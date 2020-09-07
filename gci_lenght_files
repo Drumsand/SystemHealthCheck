@@ -1,0 +1,32 @@
+$server = "server_name"
+$drives = Get-PSDrive -PSProvider 'FileSystem' | Where-Object { $_.Name -notin $exclDrives }
+$exclDrives = ('C', 'D'<# ,'E','G' #>)
+$Cp = 0.25 # 25%
+$CpS = 0.0625
+
+$s = New-PSSession -Comp $server -Name CheckDrive #-InDisconnectedSession
+Write-Output $s
+
+$f = Invoke-Command -Session $s -ScriptBlock {
+    Get-CimInstance -Class win32_Logicaldisk |
+    where { ($_.driveType -eq 3 <# -or $_.driveType -eq 2 #>) -and $_.fileSystem -ne $null }
+}
+
+$t = Invoke-Command -Session $s -ScriptBlock {
+    ForEach ($drive In $Using:drives) {
+        gci -Path $drive.root -R |
+        Sort -Descending -Property Length |
+        Select -First 2
+    }
+}
+
+Write-Output $f | ft -Property  @{n = '| Volume'; e = { '| ' + $_.deviceID -replace ":", "" } },
+@{n = '| Name';         e = { '| ' + $_.volumeName } },
+@{n = '| Size GB';      e = { '| ' + "{0:0.#} GB" -f ($_.size / 1GB) } },
+@{n = '| FreeSpace GB'; e = { '| ' + "{0:0.#} GB" -f ($_.freeSpace / 1GB) } },
+@{n = '| Free %';       e = { '| ' + "{0:N0} %" -f (($_.freeSpace / $_.size) * 100) } },
+# @{n = '| Ext';          e = { '| ' + "{0:N0} GB" -f ((((($_.size - $_.freeSpace ) * $CpS ) + $CpS ) / $Cp / 1GB )) } },
+@{n = '| Extend';       e = { '| ' + "{0:N0} GB" -f $(if ((($_.freeSpace / $_.size) * 100) -le 20) { (((($_.size - $_.freeSpace ) * $CpS ) + $CpS ) / $Cp / 1GB )} else { 0 } ) }} -Auto -Verbose
+Write-Output $t | ft -Property FullName, @{ n = 'File Size'; e = { "{0:0.#} GB" -f ($_.length / 1GB) }; a = "right" }, Length -Auto
+
+Remove-PSSession $s
