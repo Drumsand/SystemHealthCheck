@@ -1,32 +1,63 @@
-$server = "server_name"
-$drives = Get-PSDrive -PSProvider 'FileSystem' | Where-Object { $_.Name -notin $exclDrives }
-$exclDrives = ('C', 'D'<# ,'E','G' #>)
-$Cp = 0.25 # 25%
-$CpS = 0.0625
+Clear-Host
+# for single server use only
+#Requires -Version 3.0
+$Server = "server_name"
 
-$s = New-PSSession -Comp $server -Name CheckDrive #-InDisconnectedSession
-Write-Output $s
+$exclDrives = 'C'#, 'D'
+# $inclDrives = 'D', 'E', 'F', 'G', 'H'
+$Cp         = 0.25 # 25%
 
-$f = Invoke-Command -Session $s -ScriptBlock {
-    Get-CimInstance -Class win32_Logicaldisk |
-    where { ($_.driveType -eq 3 <# -or $_.driveType -eq 2 #>) -and $_.fileSystem -ne $null }
+$s      = New-PSSession -Comp $server -Name CheckDrive -ea 0 #-InDisconnectedSession
+$drives = Invoke-Command -Session $s -ScriptBlock { Get-PSDrive -PSProvider 'FileSystem' | Where-Object { ($_.Name -notin $using:exclDrives) -and ($_.Used -gt 0) } }
+
+if (-not($s) -eq $true ) {
+    Write-Warning "`n$server inaccessible for PoSh! Script will stop.`n"
+    break
 }
-
-$t = Invoke-Command -Session $s -ScriptBlock {
-    ForEach ($drive In $Using:drives) {
-        gci -Path $drive.root -R |
-        Sort -Descending -Property Length |
-        Select -First 2
+else {
+    Write-Host "`nGreat! $server is accessible!`n"
+    $f = Invoke-Command -Session $s -ScriptBlock {
+        Get-CimInstance Win32_Diskdrive -PipelineVariable disk |
+        Get-CimAssociatedInstance -ResultClassName Win32_DiskPartition -PipelineVariable partition |
+        Get-CimAssociatedInstance -ResultClassName Win32_LogicalDisk |
+        Where-Object { ($_.driveType -eq 3 <# -or $_.driveType -eq 2 #>) -and $_.fileSystem -ne $null } #-ea 0
+    }
+    $t = Invoke-Command -Session $s -ScriptBlock {
+        foreach ($drive In $Using:drives) {
+            Get-ChildItem -Path $drive.root -R |
+            Sort-Object -Descending -Property Length |
+            Select-Object -First 10 #-ea 0
+        }
     }
 }
 
-Write-Output $f | ft -Property  @{n = '| Volume'; e = { '| ' + $_.deviceID -replace ":", "" } },
-@{n = '| Name';         e = { '| ' + $_.volumeName } },
-@{n = '| Size GB';      e = { '| ' + "{0:0.#} GB" -f ($_.size / 1GB) } },
-@{n = '| FreeSpace GB'; e = { '| ' + "{0:0.#} GB" -f ($_.freeSpace / 1GB) } },
-@{n = '| Free %';       e = { '| ' + "{0:N0} %" -f (($_.freeSpace / $_.size) * 100) } },
-# @{n = '| Ext';          e = { '| ' + "{0:N0} GB" -f ((((($_.size - $_.freeSpace ) * $CpS ) + $CpS ) / $Cp / 1GB )) } },
-@{n = '| Extend';       e = { '| ' + "{0:N0} GB" -f $(if ((($_.freeSpace / $_.size) * 100) -le 20) { (((($_.size - $_.freeSpace ) * $CpS ) + $CpS ) / $Cp / 1GB )} else { 0 } ) }} -Auto -Verbose
-Write-Output $t | ft -Property FullName, @{ n = 'File Size'; e = { "{0:0.#} GB" -f ($_.length / 1GB) }; a = "right" }, Length -Auto
+$f <# | Out-String -Stream #> |
+    Sort-Object DeviceID |
+    Select-Object -Property @{n = '| Volume';       e = {'| ' + $_.deviceID -replace ":", "" }},
+            @{n = '| Volume Name';  e = {'| ' + $_.volumeName }},
+        #  @{n = '| Partition';    e = {'| ' + $_.name }},
+            @{n = '| Size GB';      e = {'| ' + "{0:0.#} GB" -f ($_.size / 1GB) }},
+            @{n = '| FreeSpace GB'; e = {'| ' + "{0:0.#} GB" -f ($_.freeSpace / 1GB) }},
+            @{n = '| Free %';       e = {'| ' + "{0:N0} %"   -f (($_.freeSpace / $_.size) * 100)}},
+            @{n = '| Extend';       e = {'| ' + "{0:N0} GB"  -f $(if ((($_.freeSpace / $_.size) * 100) -le 20) {((($Cp * ($_.size - $_.freeSpace ) / (1 - $Cp)) - $_.freeSpace) / 1GB)} else {0})}} |
+        Format-Table -Auto
+
+$t | Format-Table -Property FullName, @{ n = 'File Size'; e = { "{0:0.#} GB" -f ($_.length / 1GB) }; a = "right" }<# , Length #> -Auto
 
 Remove-PSSession $s
+
+<# 
+$targetfolder='C:\'
+$dataColl = @()
+gci -force $targetfolder -ErrorAction SilentlyContinue | ? { $_ -is [io.directoryinfo] } | % {
+$len = 0
+gci -recurse -force $_.fullname -ErrorAction SilentlyContinue | % { $len += $_.length }
+$foldername = $_.fullname
+$foldersize= '{0:N2}' -f ($len / 1Gb)
+$dataObject = New-Object PSObject
+Add-Member -inputObject $dataObject -memberType NoteProperty -name “foldername” -value $foldername
+Add-Member -inputObject $dataObject -memberType NoteProperty -name “foldersizeGb” -value $foldersize
+$dataColl += $dataObject
+}
+$dataColl | Out-GridView -Title “Size of subdirectories”
+#>
